@@ -1,0 +1,3 @@
+([('main',
+   '/Users/mhatem/Documents/Development/duplicateMCQProject/dist/main',
+   'EXECUTABLE')],)
