@@ -1,100 +1,91 @@
-import tkinter as tk
 import customtkinter
-from tkinter import filedialog
-import os
-from docx import Document
-import fitz  # PyMuPDF
+from tkinter.filedialog import askopenfilename, asksaveasfilename
+import fitz  # PyMuPDF for extracting text
+import difflib
 import re
-from lxml import etree
-import pdfplumber
-from collections import defaultdict
+import random
+import os
 import threading
-import time  # Used to simulate progress for the progress bar
 
 customtkinter.set_appearance_mode("System")
 customtkinter.set_default_color_theme("blue")
 
+# Initialize the application
+app = customtkinter.CTk()
+app.geometry("720x480")
+app.title("MCQ Duplicate Finder")
 
-def is_question_number(text):
-    return re.match(r'^\d{1,3}\.\s', text) is not None
+# Function to extract text from a PDF
+def extract_text_from_pdf(pdf_file):
+    doc = fitz.open(pdf_file)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text, doc
 
-
-def read_pdf_file(filename, progress_callback):
-    question_dict = {}
-    current_question_num = None
-    current_question_text = ''
-    previous_lines = []
-
-    with pdfplumber.open(filename) as pdf:
-        total_pages = len(pdf.pages)
-        for page_num, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
-            if text:
-                lines = text.split("\n")
-                lines = previous_lines + lines
-                
-                for line in lines:
-                    match = re.match(r'^(\d+)\.\s', line)
-                    if match:
-                        if current_question_num:
-                            question_dict[current_question_num] = current_question_text.strip()
-                        current_question_num = match.group(1)
-                        current_question_text = line[len(match.group(0)):]
-                    else:
-                        current_question_text += ' ' + line
-                
-                previous_lines = lines[-len(lines):]
-            
-            # Update progress
-            progress_callback(page_num / total_pages)
-        
-        if current_question_num:
-            question_dict[current_question_num] = current_question_text.strip()
+# Function to extract questions (split based on numbering or option patterns)
+def extract_mcq_questions(text):
+    questions = []
+    pattern = re.compile(r'\n\d+\.\s+|\n[a-zA-Z]\)\s+')
+    parts = pattern.split(text)
     
-    return question_dict
-
-
-def UploadButton(event=None):
-    filename = filedialog.askopenfilename()
-    if filename:
-        file_name_only = os.path.basename(filename)
-        title.configure(text=f"Processing... {file_name_only}", text_color="orange")
-        progress_bar.set(0)  # Reset progress bar to 0%
-        progress_bar.pack(padx=10, pady=10)  # Make the progress bar visible
-
-        # Start a new thread to process the file to avoid freezing the UI
-        threading.Thread(target=process_file, args=(filename, file_name_only)).start()
-
-
-def process_file(filename, file_name_only):
-    ext = os.path.splitext(filename)[1].lower()
+    for part in parts:
+        if part.strip():
+            questions.append(part.strip())
     
-    if ext == '.pdf':
-        questions = read_pdf_file(filename, update_progress)
-        duplicates = detect_duplicates(questions)
-        
-        if duplicates:
-            output_file = ask_save_location(file_name_only)
-            if output_file:  # If user didn't cancel the save dialog
-                highlight_duplicates(filename, output_file, duplicates)
-                title.configure(text=f"Selected: {file_name_only} ({len(questions)} questions). Duplicates highlighted.", text_color="green")
-                display_duplicates(duplicates)
+    return questions
+
+# Function to find groups of similar questions using difflib
+def find_similar_questions(questions, threshold=0.9):
+    similar_groups = []
+    n = len(questions)
+    used = set()  # To track questions that are already grouped
+
+    for i in range(n):
+        if i in used:
+            continue  # Skip if this question is already in a group
+        group = [questions[i]]  # Start a new group
+        for j in range(i + 1, n):
+            if j in used:
+                continue
+            ratio = difflib.SequenceMatcher(None, questions[i], questions[j]).ratio()
+            if ratio >= threshold:
+                group.append(questions[j])
+                used.add(j)
+        if len(group) > 1:  # Only add groups with more than one similar question
+            similar_groups.append(group)
+    return similar_groups
+
+# Function to highlight duplicate paragraphs in PDF
+def highlight_paragraphs(doc, similar_questions):
+    colors = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1), (0, 1, 1)]  # RGB colors
+    used_colors = []  # To track used colors and avoid reusing them
+    
+    for group in similar_questions:
+        # Select a new unique color for the group
+        available_colors = [color for color in colors if color not in used_colors]
+        if available_colors:
+            color = random.choice(available_colors)  # Choose a random available color
+            used_colors.append(color)  # Mark color as used
         else:
-            title.configure(text=f"No duplicates found in {file_name_only}.", text_color="blue")
-            duplicates_label.configure(text="")  # Clear label if no duplicates found
-    else:
-        title.configure(text="Invalid file format", text_color="red")
+            color = random.choice(colors)  # If all colors used, start reusing
 
-    # Final progress step to 100%
-    progress_bar.set(1)
-    title.configure(text=f"Selected: {file_name_only} processing complete", text_color="green")
-
+        # Loop through each question in the group
+        for question in group:
+            # Loop through each page to search for the question
+            for page in doc:
+                text_instances = page.search_for(question)  # Search for all exact occurrences
+                # Highlight all instances found on the page
+                for inst in text_instances:
+                    highlight = page.add_highlight_annot(inst)  # Add highlight annotation for each instance
+                    highlight.set_colors(stroke=color)  # Set the highlight color for the group
+                    highlight.update()  # Apply the changes
 
 def ask_save_location(default_filename):
     """
     Ask the user where to save the file, return the selected file path.
     """
-    save_location = filedialog.asksaveasfilename(
+    save_location = asksaveasfilename(
         defaultextension=".pdf",
         filetypes=[("PDF files", "*.pdf")],
         initialfile=f"highlighted_{default_filename}",
@@ -102,57 +93,63 @@ def ask_save_location(default_filename):
     )
     return save_location
 
-
-def highlight_duplicates(original_pdf_path, output_pdf_path, duplicates):
-    doc = fitz.open(original_pdf_path)
-    
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        for duplicate in duplicates:
-            question_number = duplicate.split('.')[0] + '.'
-            areas = page.search_for(question_number)
-            for area in areas:
-                highlight = page.add_highlight_annot(area)
-                highlight.set_colors(stroke=(1, 0, 0))  # RGB for red color
-                highlight.update()
-    
+def process_pdf(pdf_file):
     try:
-        doc.save(output_pdf_path)
-        print(f"Highlighted duplicates saved to: {output_pdf_path}")
-    except Exception as e:
-        print(f"Error saving highlighted PDF: {e}")
+        # Extract text from the uploaded PDF
+        text, doc = extract_text_from_pdf(pdf_file)
+        update_progress(0.3)
+
+        # Extract questions and find similar ones
+        questions = extract_mcq_questions(text)
+        similar_questions = find_similar_questions(questions)
+        update_progress(0.6)
+
+        # Highlight similar questions
+        if similar_questions:
+            highlight_paragraphs(doc, similar_questions)
+            update_progress(1.0)  # Set progress bar to 100%
+            progress_bar.pack_forget()  # Hide progress bar once done
+            # Ask user for save location after processing is complete
+            save_path = ask_save_location("Highlighted_Similar_Questions.pdf")
+            if save_path:
+                doc.save(save_path)  # Save the new PDF with highlights
+                result_text = f"Similar questions highlighted. New file saved as '{save_path}'"
+            else:
+                result_text = "File saving canceled"
+        else:
+            result_text = "No similar questions found"
+        
+        update_progress(1.0)  # Set progress bar to 100%
     finally:
-        doc.close()
-    
-def detect_duplicates(question_dict):
-    question_texts = defaultdict(list)
-    
-    for num, text in question_dict.items():
-        question_texts[text].append(num)
-    
-    duplicates = {text: nums for text, nums in question_texts.items() if len(nums) > 1}
-    
-    return duplicates
+        doc.close()  # Close the PDF
+        # Re-enable the button and reset the text after processing is done
+        button.configure(text="Open", state="normal")
+        progress_bar.pack_forget()  # Hide progress bar once done
+        duplicates_label.configure(text=result_text)
+        app.update()  # Ensure the GUI updates to reflect the changes
 
+def UploadButton():
+    pdf_file = askopenfilename(filetypes=[("PDF files", "*.pdf")])
+    if pdf_file:
+        # Disable the button and change the text to indicate loading
+        button.configure(text="Processing...", state="disabled")
+        progress_bar.pack(pady=10)  # Show progress bar
+        progress_bar.set(0)  # Initialize progress bar to 0
+        app.update()  # Update the GUI to show the progress bar immediately
+        
+        # Run the PDF processing in a separate thread
+        threading.Thread(target=process_pdf, args=(pdf_file,)).start()
 
-def display_duplicates(duplicates):
-    duplicate_text = ""
-    for _, numbers in duplicates.items():
-        duplicate_text += f"Duplicated question numbers: {', '.join(numbers)}\n"
-    
-    duplicates_label.configure(text=duplicate_text)
-
-
-def update_progress(progress):
+def update_progress(value):
     """
-    Update the progress bar. `progress` is a value between 0 and 1.
+    Update the progress bar from the main thread.
     """
-    progress_bar.set(progress)
-
-
-app = customtkinter.CTk()
-app.geometry("720x480")
-app.title("MCQ duplicate finder")
+    progress_bar.set(value)
+    app.update()
+    
+# Add program name label with larger text
+program_name_label = customtkinter.CTkLabel(app, text="MCQ Duplicate Finder", font=("Arial", 24, "bold"))
+program_name_label.pack(pady=20)
 
 # Add title label
 title = customtkinter.CTkLabel(app, text="Upload file")
@@ -167,7 +164,7 @@ progress_bar = customtkinter.CTkProgressBar(app, width=500)
 progress_bar.set(0)  # Initialize the progress bar to 0
 progress_bar.pack_forget()  # Hide progress bar initially
 
-# Add a label to display duplicates
+# Add a label to display results
 duplicates_label = customtkinter.CTkLabel(app, text="", justify="left")
 duplicates_label.pack(padx=10, pady=10)
 
